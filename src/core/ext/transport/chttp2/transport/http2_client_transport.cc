@@ -153,6 +153,17 @@ Http2Status Http2ClientTransport::ProcessHttp2DataFrame(Http2DataFrame frame) {
   // Lookup stream
   GRPC_HTTP2_CLIENT_DLOG << "Http2Transport ProcessHttp2DataFrame LookupStream";
   RefCountedPtr<Stream> stream = LookupStream(frame.stream_id);
+
+  ValueOrHttp2Status<chttp2::FlowControlAction> flow_control_action =
+      ProcessIncomingDataFrameFlowControl(current_frame_header_, flow_control_,
+                                          stream);
+  if (!flow_control_action.IsOk()) {
+    return ValueOrHttp2Status<chttp2::FlowControlAction>::TakeStatus(
+        std::move(flow_control_action));
+  }
+  ActOnFlowControlAction(flow_control_action.value(),
+                         stream == nullptr ? 0 : stream->GetStreamId());
+
   if (stream == nullptr) {
     // TODO(tjagtap) : [PH2][P2] : Implement the correct behaviour later.
     // RFC9113 : If a DATA frame is received whose stream is not in the "open"
@@ -645,21 +656,13 @@ void Http2ClientTransport::ActOnFlowControlAction(
     GRPC_DCHECK_GT(stream_id, 0u);
     RefCountedPtr<Stream> stream = LookupStream(stream_id);
     if (GPR_LIKELY(stream != nullptr)) {
-      const HttpStreamState state = stream->GetStreamState();
-      if (state != HttpStreamState::kHalfClosedRemote &&
-          state != HttpStreamState::kClosed) {
-        // Stream is not remotely closed, so sending a WINDOW_UPDATE is
-        // potentially useful.
-        // TODO(tjagtap) : [PH2][P1] Plumb with flow control
+      if (stream->CanSendWindowUpdateFrames()) {
+        window_update_list_.insert(stream_id);
       }
     } else {
       GRPC_HTTP2_CLIENT_DLOG
           << "Http2ClientTransport ActOnFlowControlAction stream is null";
     }
-  }
-
-  if (action.send_transport_update() != kNoActionNeeded) {
-    // TODO(tjagtap) : [PH2][P1] Plumb with flow control
   }
 
   // TODO(tjagtap) : [PH2][P1] Plumb
@@ -689,6 +692,8 @@ auto Http2ClientTransport::WriteControlFrames() {
   MaybeGetSettingsFrame(output_buf);
   ping_manager_.MaybeGetSerializedPingFrames(output_buf,
                                              NextAllowedPingInterval());
+  MaybeGetWindowUpdateFrames(output_buf);
+
   const uint64_t buffer_length = output_buf.Length();
   return If(
       buffer_length > 0,
@@ -711,6 +716,7 @@ void Http2ClientTransport::NotifyControlFramesWriteDone() {
   // Notify Control modules that we have sent the frames.
   // All notifications are expected to be synchronous.
   GRPC_HTTP2_CLIENT_DLOG << "Http2ClientTransport NotifyControlFramesWriteDone";
+  flow_control_.FlushedSettings();
   ping_manager_.NotifyPingSent(ping_timeout_);
 }
 
@@ -904,6 +910,35 @@ auto Http2ClientTransport::OnMultiplexerLoopEnded() {
             std::nullopt, Http2Status::AbslConnectionError(
                               status.code(), std::string(status.message())));
       };
+}
+
+void Http2ClientTransport::MaybeGetWindowUpdateFrames(SliceBuffer& output_buf) {
+  std::vector<Http2Frame> frames;
+  frames.reserve(window_update_list_.size() + 1);
+  uint32_t window_size =
+      flow_control_.DesiredAnnounceSize(/*writing_anyway=*/true);
+  if (window_size > 1) {
+    /* The first DesiredAnnounceSize we get is size 1 , which is pointless. */
+    GRPC_HTTP2_CLIENT_DLOG << "Transport Window Update : " << window_size;
+    frames.emplace_back(Http2WindowUpdateFrame{/*stream_id=*/0, window_size});
+    flow_control_.SentUpdate(window_size);
+  }
+  for (const uint32_t stream_id : window_update_list_) {
+    RefCountedPtr<Stream> stream = LookupStream(stream_id);
+    if (stream != nullptr && stream->CanSendWindowUpdateFrames()) {
+      const uint32_t increment = stream->flow_control.MaybeSendUpdate();
+      if (increment > 0) {
+        GRPC_HTTP2_CLIENT_DLOG << "Stream Window Update { " << stream_id << ", "
+                               << window_size << " }";
+        frames.emplace_back(Http2WindowUpdateFrame{stream_id, increment});
+      }
+    }
+  }
+  window_update_list_.clear();
+  if (!frames.empty()) {
+    GRPC_HTTP2_CLIENT_DLOG << "Total Window Update Frames : " << frames.size();
+    Serialize(absl::Span<Http2Frame>(frames), output_buf);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

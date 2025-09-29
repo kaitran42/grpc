@@ -26,6 +26,7 @@
 #include "src/core/channelz/channelz.h"
 #include "src/core/ext/transport/chttp2/transport/flow_control.h"
 #include "src/core/ext/transport/chttp2/transport/frame.h"
+#include "src/core/ext/transport/chttp2/transport/stream.h"
 #include "src/core/lib/promise/mpsc.h"
 #include "src/core/lib/promise/party.h"
 #include "src/core/lib/transport/promise_endpoint.h"
@@ -143,6 +144,38 @@ RefCountedPtr<channelz::SocketNode> CreateChannelzSocketNode(
         args.GetObjectRef<channelz::SocketNode::Security>());
   }
   return nullptr;
+}
+
+ValueOrHttp2Status<chttp2::FlowControlAction>
+ProcessIncomingDataFrameFlowControl(Http2FrameHeader& frame_header,
+                                    chttp2::TransportFlowControl& flow_control,
+                                    RefCountedPtr<Stream> stream) {
+  // RFC9113 : For flow-control calculations, the 9-octet frame header is not
+  // counted.
+  const uint32_t flow_control_consumed = frame_header.length - kFrameHeaderSize;
+  if (stream == nullptr) {
+    // This flow control bookkeeping needs to happen even though the stream is
+    // gone because otherwise we will go out-of-sync with the peer.
+    // The flow control numbers should be consistent for both peers.
+    chttp2::TransportFlowControl::IncomingUpdateContext transport_fc(
+        &flow_control);
+    absl::Status fc_status = transport_fc.RecvData(flow_control_consumed);
+    if (!fc_status.ok()) {
+      LOG(ERROR) << "Flow control error: " << fc_status.message();
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kFlowControlError, std::string(fc_status.message()));
+    }
+    return transport_fc.MakeAction();
+  } else {
+    chttp2::StreamFlowControl::IncomingUpdateContext fc(&stream->flow_control);
+    absl::Status fc_status = fc.RecvData(flow_control_consumed);
+    if (!fc_status.ok()) {
+      LOG(ERROR) << "Flow control error: " << fc_status.message();
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kFlowControlError, std::string(fc_status.message()));
+    }
+    return fc.MakeAction();
+  }
 }
 
 }  // namespace http2

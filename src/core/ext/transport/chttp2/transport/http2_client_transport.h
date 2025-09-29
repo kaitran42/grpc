@@ -24,6 +24,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
+
 #include "src/core/call/call_spine.h"
 #include "src/core/ext/transport/chttp2/transport/flow_control.h"
 #include "src/core/ext/transport/chttp2/transport/flow_control_manager.h"
@@ -465,6 +467,8 @@ class Http2ClientTransport final : public ClientTransport,
     }
   }
 
+  void MaybeGetWindowUpdateFrames(SliceBuffer& output_buf);
+
   // Ping Helper functions
   Duration NextAllowedPingInterval() {
     MutexLock lock(&transport_mutex_);
@@ -619,6 +623,7 @@ class Http2ClientTransport final : public ClientTransport,
   MemoryOwner memory_owner_;
   chttp2::TransportFlowControl flow_control_;
   std::shared_ptr<PromiseHttp2ZTraceCollector> ztrace_collector_;
+  absl::flat_hash_set<uint32_t> window_update_list_;
 };
 
 // Since the corresponding class in CHTTP2 is about 3.9KB, our goal is to

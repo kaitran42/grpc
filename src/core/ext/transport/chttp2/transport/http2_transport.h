@@ -35,9 +35,12 @@
 #include "src/core/lib/transport/transport.h"
 #include "src/core/util/ref_counted_ptr.h"
 #include "src/core/util/sync.h"
+#include "src/core/ext/transport/chttp2/transport/http2_status.h"
 
 namespace grpc_core {
 namespace http2 {
+
+class Stream;
 
 // Experimental : This is just the initial skeleton of class
 // and it is functions. The code will be written iteratively.
@@ -52,19 +55,6 @@ namespace http2 {
 #define GRPC_HTTP2_COMMON_DLOG \
   DLOG_IF(INFO, GRPC_TRACE_FLAG_ENABLED(http2_ph2_transport))
 
-// TODO(akshitpatel) : [PH2][P4] : Choose appropriate size later.
-constexpr uint32_t kStreamQueueSize = /*1 MB*/ 1024u * 1024u;
-constexpr uint32_t kMaxWriteSize = /*10 MB*/ 10u * 1024u * 1024u;
-
-enum class HttpStreamState : uint8_t {
-  // https://www.rfc-editor.org/rfc/rfc9113.html#name-stream-states
-  kIdle,
-  kOpen,
-  kHalfClosedLocal,
-  kHalfClosedRemote,
-  kClosed,
-};
-
 void InitLocalSettings(Http2Settings& settings, const bool is_client);
 
 void ReadSettingsFromChannelArgs(const ChannelArgs& channel_args,
@@ -76,6 +66,11 @@ RefCountedPtr<channelz::SocketNode> CreateChannelzSocketNode(
     std::shared_ptr<grpc_event_engine::experimental::EventEngine::Endpoint>
         event_engine_endpoint,
     const ChannelArgs& args);
+
+ValueOrHttp2Status<chttp2::FlowControlAction>
+ProcessIncomingDataFrameFlowControl(Http2FrameHeader& frame,
+                                    chttp2::TransportFlowControl& flow_control,
+                                    RefCountedPtr<Stream> stream);
 
 }  // namespace http2
 }  // namespace grpc_core
